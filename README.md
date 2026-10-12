@@ -1,4 +1,4 @@
-# Practical 4: Building a RESTful API with Node.js and Express
+# Practical 5: MongoDB Integration and Schema Design with Mongoose
 
 **Student Details:**
 - **Name:** Jay Ladva
@@ -10,33 +10,61 @@
 ---
 
 ## 📌 Objective
-To design and implement a RESTful backend server with complete CRUD endpoints using the Express middleware pipeline, request logging, and centralized error handling.
+To connect a MongoDB database to an Express server and enforce strict data validation through Mongoose schema, replacing the in-memory array storage from Practical 4 with real database persistence.
 
 ---
 
-## 🏗️ Architecture & Request-Response Pipeline
+## 🏗️ Architecture & Database Flow
 ```
-Client (Postman / Thunder Client / Browser)
+Client (Postman / Browser / Test Suite)
    │
    ▼
-[1. Request Logging Middleware] (Method, URL, Timestamp)
+[1. Request Logging Middleware] (Method, URL, ISO Timestamp)
    │
    ▼
-[2. Content-Type Validator Middleware] (Requires application/json on POST/PUT)
+[2. Content-Type Validator Middleware] (Enforces application/json on POST/PUT)
    │
    ▼
-[3. Express Router & Route-Specific Middleware]
-   ├── GET    /tasks              ──> getAllTasks (200 OK)
-   ├── GET    /tasks/:id          ──> validateTaskId ──> getTaskById (200 OK / 404)
-   ├── POST   /tasks              ──> createTask (201 Created / 400 Bad Request)
-   ├── PUT    /tasks/:id          ──> validateTaskId ──> updateTask (200 OK / 404)
-   └── DELETE /tasks/:id          ──> validateTaskId ──> deleteTask (200 OK / 404)
+[3. Express Router & Controllers (Mongoose ODM)]
+   ├── GET    /tasks              ──> Task.find() (200 OK)
+   ├── GET    /tasks/:id          ──> validateTaskId ──> Task.findById() (200 OK / 404)
+   ├── POST   /tasks              ──> Task.save() (201 Created / 400 Validation Error)
+   ├── PUT    /tasks/:id          ──> validateTaskId ──> Task.findByIdAndUpdate() (200 OK / 404)
+   └── DELETE /tasks/:id          ──> validateTaskId ──> Task.findByIdAndDelete() (200 OK / 404)
    │
    ▼
-[4. Custom 404 Handler for Undefined Routes] (404 Not Found)
+[4. Mongoose Schema Validation & Pre-Save Hooks]
+   ├── Required fields validation: title
+   ├── Priority enum validation: ['low', 'medium', 'high']
+   └── Pre-save hook: Automatic whitespace trimming on title
    │
    ▼
-[5. Global Error Handling Middleware] (500 Internal Server Error)
+[5. MongoDB Database Engine (localhost:27017)]
+   └── tasks collection { _id, title, description, completed, priority, createdAt }
+   │
+   ▼
+[6. Centralized Error Handler] (Formats Mongoose ValidationErrors to clean JSON)
+```
+
+---
+
+## 📋 Task Mongoose Schema (`models/Task.js`)
+
+| Field | Type | Constraints / Defaults | Description |
+|-------|------|------------------------|-------------|
+| `title` | `String` | `required: true`, trimmed | Title of the task |
+| `description` | `String` | `default: ''` | Detailed task description |
+| `completed` | `Boolean` | `default: false` | Task completion status flag |
+| `priority` | `String` | `enum: ['low', 'medium', 'high']`, `default: 'medium'` | Task urgency level (Supplementary 1) |
+| `createdAt` | `Date` | `default: Date.now` | Creation timestamp |
+
+### Pre-Save Hook (Supplementary Problem 2)
+```javascript
+taskSchema.pre('save', function () {
+  if (this.title && typeof this.title === 'string') {
+    this.title = this.title.trim();
+  }
+});
 ```
 
 ---
@@ -45,44 +73,36 @@ Client (Postman / Thunder Client / Browser)
 
 | HTTP Method | Route | Description | Status Codes |
 |-------------|-------|-------------|--------------|
-| `GET` | `/` | Root health check and API overview | `200 OK` |
-| `GET` | `/tasks` | Retrieve all tasks (supports query filtering) | `200 OK` |
-| `GET` | `/tasks/:id` | Retrieve a specific task by ID | `200 OK`, `400 Bad Request`, `404 Not Found` |
-| `POST` | `/tasks` | Create a new task | `201 Created`, `400 Bad Request` |
-| `PUT` | `/tasks/:id` | Update an existing task | `200 OK`, `400 Bad Request`, `404 Not Found` |
-| `DELETE` | `/tasks/:id` | Remove a task by ID | `200 OK`, `400 Bad Request`, `404 Not Found` |
-| `GET` | `/trigger-error` | Deliberately triggers global error handler | `500 Internal Server Error` |
+| `GET` | `/` | Root endpoint showing API and MongoDB status | `200 OK` |
+| `GET` | `/tasks` | Retrieve all tasks from MongoDB (supports query filters) | `200 OK` |
+| `GET` | `/tasks/:id` | Retrieve single task by 24-char ObjectId | `200 OK`, `400 Bad Request`, `404 Not Found` |
+| `POST` | `/tasks` | Create and persist task in MongoDB | `201 Created`, `400 Validation Error` |
+| `PUT` | `/tasks/:id` | Update task document in MongoDB | `200 OK`, `400 Validation Error`, `404 Not Found` |
+| `DELETE` | `/tasks/:id` | Remove task document from MongoDB | `200 OK`, `400 Bad Request`, `404 Not Found` |
+| `GET` | `/trigger-error` | Deliberately triggers centralized error handler | `500 Internal Server Error` |
 
 ---
 
-## ⚙️ Middleware Features & Supplementary Problems
-
-1. **Global Request Logger:**
-   Logs every request: `[2026-10-11T18:25:00.000Z] GET /tasks`.
-2. **Content-Type Validation Middleware (Supplementary Problem 1):**
-   Rejects any `POST` or `PUT` request without `Content-Type: application/json` header with HTTP 400.
-3. **Route-Specific ID Validation Middleware (Supplementary Problem 2):**
-   Validates `:id` parameter to guarantee it is a positive integer before hitting controller logic.
-4. **Custom 404 Handler (Supplementary Problem 3):**
-   Catches unhandled paths (e.g. `GET /unknown`) and returns a structured JSON payload listing available endpoints.
-5. **Centralized Global Error Handler:**
-   Positioned as the last middleware with four parameters `(err, req, res, next)` to ensure safe error responses without leaking stack traces.
-
----
-
-## 🛠️ Installation & Execution
+## 🛠️ Setup & Running Locally
 
 1. **Install dependencies:**
    ```bash
    npm install
    ```
 
-2. **Start the API server:**
+2. **Configure environment:**
+   Create `.env` using `.env.example`:
+   ```env
+   PORT=5000
+   MONGO_URI=mongodb://127.0.0.1:27017/task_manager_db
+   ```
+
+3. **Start the API server:**
    ```bash
    npm start
    ```
 
-3. **Run automated API test suite:**
+4. **Run automated verification test suite:**
    ```bash
    npm test
    ```

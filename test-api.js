@@ -1,8 +1,9 @@
+require('dotenv').config();
+const mongoose = require('mongoose');
 const app = require('./server');
-const http = require('http');
 
 let server;
-const PORT = 5055;
+const PORT = 5056;
 const BASE_URL = `http://localhost:${PORT}`;
 
 async function request(path, options = {}) {
@@ -23,9 +24,14 @@ async function request(path, options = {}) {
 
 async function runTests() {
   console.log('===============================================================');
-  console.log('  Practical 4: Express RESTful API Automated Verification Test ');
+  console.log('  Practical 5: MongoDB & Mongoose REST API Verification Tests ');
   console.log('  Student: Jay Ladva (24CS045) | ITUE301                        ');
   console.log('===============================================================\n');
+
+  // Wait for MongoDB connection
+  if (mongoose.connection.readyState !== 1) {
+    await new Promise((resolve) => mongoose.connection.once('open', resolve));
+  }
 
   let passed = 0;
   let total = 0;
@@ -43,38 +49,30 @@ async function runTests() {
   }
 
   // 1. Health check
-  await testCase('GET / - API root returns 200 OK', async () => {
+  await testCase('GET / - API root returns 200 OK and MongoDB status', async () => {
     const res = await request('/');
     if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
-    if (!res.data.endpoints) throw new Error('Endpoints overview missing');
+    if (!res.data.endpoints) throw new Error('Endpoints object missing');
   });
 
-  // 2. GET /tasks
-  await testCase('GET /tasks - Retrieve all tasks returns 200 OK with array', async () => {
-    const res = await request('/tasks');
-    if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
-    if (!Array.isArray(res.data.data)) throw new Error('Data is not an array');
-    if (res.data.count < 1) throw new Error('Expected at least 1 seeded task');
-  });
-
-  // 3. POST /tasks without Content-Type (Supplementary Problem 1)
+  // 2. POST /tasks without Content-Type header (Content-Type middleware)
   await testCase('POST /tasks without Content-Type header rejected with 400 Bad Request', async () => {
     const res = await request('/tasks', {
       method: 'POST',
-      body: JSON.stringify({ title: 'Invalid Content-Type Task' })
-      // Notice: No headers provided!
+      body: JSON.stringify({ title: 'No Header Task' })
     });
     if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
-    if (res.data.error !== 'Bad Request') throw new Error(`Unexpected error message: ${JSON.stringify(res.data)}`);
+    if (res.data.error !== 'Bad Request') throw new Error(`Expected Bad Request error`);
   });
 
-  // 4. POST /tasks with valid payload
+  // 3. POST /tasks with valid payload (MongoDB persistence)
   let createdTaskId;
-  await testCase('POST /tasks with valid payload returns 201 Created and new task', async () => {
+  await testCase('POST /tasks creates task in MongoDB and returns 201 Created', async () => {
     const payload = {
-      title: 'Automated Test Task',
-      description: 'Created during test suite execution',
-      status: 'pending'
+      title: 'Practical 5 MongoDB Task',
+      description: 'Verifying Mongoose schema and database insertion',
+      completed: false,
+      priority: 'high'
     };
     const res = await request('/tasks', {
       method: 'POST',
@@ -82,84 +80,133 @@ async function runTests() {
       body: JSON.stringify(payload)
     });
     if (res.status !== 201) throw new Error(`Expected 201, got ${res.status}`);
+    if (!res.data.data._id) throw new Error('MongoDB _id is missing');
     if (res.data.data.title !== payload.title) throw new Error('Title mismatch');
-    createdTaskId = res.data.data.id;
+    if (res.data.data.priority !== 'high') throw new Error('Priority mismatch');
+    createdTaskId = res.data.data._id;
   });
 
-  // 5. POST /tasks with missing title
-  await testCase('POST /tasks with missing title returns 400 Validation Error', async () => {
+  // 4. Schema Validation: Missing required title field
+  await testCase('POST /tasks without required title returns 400 structured Validation Error', async () => {
     const res = await request('/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description: 'No title' })
+      body: JSON.stringify({ description: 'Missing title task' })
     });
     if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
-    if (res.data.error !== 'Validation Error') throw new Error('Expected Validation Error');
+    if (res.data.error !== 'Validation Error') throw new Error(`Expected Validation Error, got ${res.data.error}`);
+    if (!res.data.message.includes('Task title is required')) throw new Error('Expected required message');
   });
 
-  // 6. GET /tasks/:id (valid ID)
+  // 5. Schema Validation: Invalid priority enum (Supplementary Problem 1)
+  await testCase('POST /tasks with invalid priority enum returns 400 Validation Error', async () => {
+    const res = await request('/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Enum Test Task',
+        priority: 'urgent' // Not in ['low', 'medium', 'high']
+      })
+    });
+    if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
+    if (res.data.error !== 'Validation Error') throw new Error(`Expected Validation Error`);
+    if (!res.data.message.includes('Priority must be one of')) throw new Error('Expected enum error message');
+  });
+
+  // 6. Pre-save hook: Automatic title whitespace trimming (Supplementary Problem 2)
+  let trimmedTaskId;
+  await testCase('POST /tasks automatically trims title whitespace via pre-save hook', async () => {
+    const untrimmedTitle = '    Whitespace Trimmed Task Title    ';
+    const res = await request('/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: untrimmedTitle })
+    });
+    if (res.status !== 201) throw new Error(`Expected 201, got ${res.status}`);
+    if (res.data.data.title !== 'Whitespace Trimmed Task Title') {
+      throw new Error(`Expected trimmed title, got '${res.data.data.title}'`);
+    }
+    trimmedTaskId = res.data.data._id;
+  });
+
+  // 7. GET /tasks - Read all tasks
+  await testCase('GET /tasks retrieves tasks from MongoDB and returns 200 OK', async () => {
+    const res = await request('/tasks');
+    if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
+    if (!Array.isArray(res.data.data)) throw new Error('Expected array of tasks');
+    if (res.data.count < 1) throw new Error('Expected at least 1 task in database');
+  });
+
+  // 8. GET /tasks/:id - Read single task by ID
   await testCase('GET /tasks/:id with valid existing ID returns 200 OK', async () => {
     const res = await request(`/tasks/${createdTaskId}`);
     if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
-    if (res.data.data.id !== createdTaskId) throw new Error('Task ID mismatch');
+    if (res.data.data._id !== createdTaskId) throw new Error('ID mismatch');
   });
 
-  // 7. GET /tasks/:id with non-numeric ID (Supplementary Problem 2)
-  await testCase('GET /tasks/:id with invalid ID format ("abc") rejected with 400 Bad Request', async () => {
-    const res = await request('/tasks/abc');
+  // 9. GET /tasks/:id - Non-existent ID returns 404 (Supplementary Problem 3)
+  await testCase('GET /tasks/:id with non-existent ObjectId returns 404 Not Found', async () => {
+    const fakeId = '507f1f77bcf86cd799439011';
+    const res = await request(`/tasks/${fakeId}`);
+    if (res.status !== 404) throw new Error(`Expected 404, got ${res.status}`);
+    if (res.data.error !== 'Not Found') throw new Error('Expected Not Found error');
+  });
+
+  // 10. GET /tasks/:id with malformed ObjectId
+  await testCase('GET /tasks/:id with malformed ObjectId rejected with 400 Bad Request', async () => {
+    const res = await request('/tasks/invalid-id-123');
     if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
     if (res.data.error !== 'Invalid Task ID') throw new Error('Expected Invalid Task ID');
   });
 
-  // 8. GET /tasks/:id with non-existent numeric ID
-  await testCase('GET /tasks/9999 with non-existent ID returns 404 Not Found', async () => {
-    const res = await request('/tasks/9999');
-    if (res.status !== 404) throw new Error(`Expected 404, got ${res.status}`);
-  });
-
-  // 9. PUT /tasks/:id
-  await testCase('PUT /tasks/:id with valid updates returns 200 OK and updated task', async () => {
+  // 11. PUT /tasks/:id - Update task in MongoDB
+  await testCase('PUT /tasks/:id updates task in MongoDB and returns 200 OK', async () => {
     const res = await request(`/tasks/${createdTaskId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'completed', description: 'Updated successfully' })
+      body: JSON.stringify({ completed: true, priority: 'low' })
     });
     if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
-    if (res.data.data.status !== 'completed') throw new Error('Status not updated');
+    if (res.data.data.completed !== true) throw new Error('Completed not updated');
+    if (res.data.data.priority !== 'low') throw new Error('Priority not updated');
   });
 
-  // 10. DELETE /tasks/:id
-  await testCase('DELETE /tasks/:id removes task and returns 200 OK', async () => {
+  // 12. DELETE /tasks/:id - Remove task from MongoDB
+  await testCase('DELETE /tasks/:id removes task from MongoDB and returns 200 OK', async () => {
     const res = await request(`/tasks/${createdTaskId}`, {
       method: 'DELETE'
     });
     if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}`);
 
-    // Verify task is now deleted
+    // Verify task is deleted from database
     const verifyRes = await request(`/tasks/${createdTaskId}`);
-    if (verifyRes.status !== 404) throw new Error('Deleted task still accessible');
+    if (verifyRes.status !== 404) throw new Error('Deleted task still found in database');
   });
 
-  // 11. Undefined route custom 404 handler (Supplementary Problem 3)
-  await testCase('GET /api/undefined-route returns structured 404 JSON response', async () => {
+  // Clean up the trimmed test task
+  if (trimmedTaskId) {
+    await request(`/tasks/${trimmedTaskId}`, { method: 'DELETE' });
+  }
+
+  // 13. Undefined route custom 404 handler
+  await testCase('GET /undefined-route returns structured 404 JSON response', async () => {
     const res = await request('/api/undefined-route');
     if (res.status !== 404) throw new Error(`Expected 404, got ${res.status}`);
     if (res.data.error !== 'Route Not Found') throw new Error('Expected Route Not Found');
-    if (!Array.isArray(res.data.validRoutes)) throw new Error('Expected validRoutes list');
   });
 
-  // 12. Deliberate unhandled error caught by Global Error Handler
+  // 14. Centralized global error handler
   await testCase('GET /trigger-error triggers centralized 500 error handler', async () => {
     const res = await request('/trigger-error');
     if (res.status !== 500) throw new Error(`Expected 500, got ${res.status}`);
-    if (res.data.error !== 'Error') throw new Error(`Unexpected error format: ${JSON.stringify(res.data)}`);
   });
 
   console.log('\n===============================================================');
-  console.log(`  Test Results Summary: ${passed} / ${total} Tests Passed (${Math.round((passed/total)*100)}%)`);
+  console.log(`  Test Results Summary: ${passed} / ${total} Tests Passed (${Math.round((passed / total) * 100)}%)`);
   console.log('===============================================================\n');
 
   server.close();
+  await mongoose.disconnect();
 }
 
 server = app.listen(PORT, () => {

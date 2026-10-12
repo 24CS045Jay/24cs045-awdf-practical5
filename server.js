@@ -2,13 +2,18 @@
  * Charotar University of Science and Technology (CHARUSAT)
  * CSPIT - Computer Science & Engineering
  * Course: Advanced Web Development Frameworks (ITUE301)
- * Practical 4: Building a RESTful API with Node.js and Express
+ * Practical 5: MongoDB Integration and Schema Design with Mongoose
  * Student: Jay Ladva (24CS045)
  */
 
+require('dotenv').config();
 const express = require('express');
+const mongoose = require('mongoose');
+const Task = require('./models/Task');
+
 const app = express();
 const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/task_manager_db';
 
 // ==========================================
 // 1. Built-in JSON Body Parsing Middleware
@@ -26,7 +31,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. Supplementary Problem: Content-Type Validation Middleware
+// 3. Content-Type Validation Middleware
 // Rejects POST / PUT requests missing 'application/json' Content-Type
 // ==========================================
 const requireJsonContent = (req, res, next) => {
@@ -45,64 +50,31 @@ const requireJsonContent = (req, res, next) => {
 app.use(requireJsonContent);
 
 // ==========================================
-// 4. In-Memory Task Storage (Temporary Array)
-// ==========================================
-let tasks = [
-  {
-    id: 1,
-    title: 'Complete Practical 4 Lab',
-    description: 'Implement Express RESTful API with full CRUD and middleware pipeline.',
-    status: 'in-progress',
-    createdAt: new Date('2026-10-11T10:00:00.000Z').toISOString(),
-    updatedAt: new Date('2026-10-11T10:00:00.000Z').toISOString()
-  },
-  {
-    id: 2,
-    title: 'Review IBM Coursera Module 1',
-    description: 'Study REST API design, middleware lifecycle, and error handling.',
-    status: 'completed',
-    createdAt: new Date('2026-10-11T11:00:00.000Z').toISOString(),
-    updatedAt: new Date('2026-10-11T11:00:00.000Z').toISOString()
-  },
-  {
-    id: 3,
-    title: 'Prepare Postman Test Collection',
-    description: 'Verify status codes: 200 OK, 201 Created, 400 Bad Request, 404 Not Found, 500 Error.',
-    status: 'pending',
-    createdAt: new Date('2026-10-11T12:00:00.000Z').toISOString(),
-    updatedAt: new Date('2026-10-11T12:00:00.000Z').toISOString()
-  }
-];
-
-let nextId = 4;
-
-// ==========================================
-// 5. Supplementary Problem: Route-Specific ID Validation Middleware
-// Validates that :id is a positive integer before reaching controllers
+// 4. Route-Specific ID Validation Middleware
+// Validates 24-character hexadecimal MongoDB ObjectId format
 // ==========================================
 const validateTaskId = (req, res, next) => {
-  const parsedId = Number(req.params.id);
-  if (!Number.isInteger(parsedId) || parsedId <= 0) {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({
       error: 'Invalid Task ID',
-      message: `The provided ID '${req.params.id}' is invalid. Task ID must be a positive integer.`
+      message: `The provided ID '${id}' is not a valid 24-character MongoDB ObjectId.`
     });
   }
-  req.validatedId = parsedId;
   next();
 };
 
 // ==========================================
-// 6. RESTful CRUD Routes for Tasks
+// 5. RESTful CRUD Routes for Tasks (Mongoose Model Operations)
 // ==========================================
 
 // GET / - Root Health / Welcome endpoint
 app.get('/', (req, res) => {
   res.status(200).json({
-    message: 'Welcome to Task Manager RESTful API (Practical 4)',
+    message: 'Welcome to Task Manager RESTful API with MongoDB & Mongoose (Practical 5)',
     author: 'Jay Ladva (24CS045)',
     course: 'ITUE301: Advanced Web Development Frameworks',
-    version: '1.0.0',
+    database: mongoose.connection.readyState === 1 ? 'Connected (MongoDB)' : 'Connecting...',
     endpoints: {
       getAllTasks: 'GET /tasks',
       getTaskById: 'GET /tasks/:id',
@@ -113,149 +85,141 @@ app.get('/', (req, res) => {
   });
 });
 
-// GET /tasks - Read all tasks (with optional query filter by status)
-app.get('/tasks', (req, res) => {
-  const { status, search } = req.query;
-  let result = tasks;
+// GET /tasks - Read all tasks (supports query filtering by ?completed=, ?priority=, ?search=)
+app.get('/tasks', async (req, res, next) => {
+  try {
+    const { completed, priority, search } = req.query;
+    const filter = {};
 
-  if (status) {
-    result = result.filter(t => t.status.toLowerCase() === status.toLowerCase());
+    if (completed !== undefined) {
+      filter.completed = completed === 'true';
+    }
+    if (priority) {
+      filter.priority = priority.toLowerCase();
+    }
+    if (search) {
+      filter.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const tasks = await Task.find(filter).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: tasks.length,
+      data: tasks
+    });
+  } catch (err) {
+    next(err);
   }
-  if (search) {
-    result = result.filter(t =>
-      t.title.toLowerCase().includes(search.toLowerCase()) ||
-      t.description.toLowerCase().includes(search.toLowerCase())
+});
+
+// GET /tasks/:id - Read single task by ID (Supplementary Problem 3: returns 404 if not found)
+app.get('/tasks/:id', validateTaskId, async (req, res, next) => {
+  try {
+    const task = await Task.findById(req.params.id);
+    if (!task) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: `Task with ID ${req.params.id} does not exist in the database.`
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: task
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /tasks - Create a new task in MongoDB using Task.create() / new Task().save()
+app.post('/tasks', async (req, res, next) => {
+  try {
+    const { title, description, completed, priority } = req.body;
+
+    // Notice: Mongoose pre-save hook handles whitespace trimming on title
+    // Mongoose schema enforces required: true and priority enum
+    const task = new Task({
+      title,
+      description,
+      completed,
+      priority
+    });
+
+    const savedTask = await task.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Task created successfully in MongoDB database.',
+      data: savedTask
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /tasks/:id - Update an existing task using Task.findByIdAndUpdate()
+app.put('/tasks/:id', validateTaskId, async (req, res, next) => {
+  try {
+    const { title, description, completed, priority } = req.body;
+    const updates = {};
+
+    if (title !== undefined) updates.title = title;
+    if (description !== undefined) updates.description = description;
+    if (completed !== undefined) updates.completed = completed;
+    if (priority !== undefined) updates.priority = priority;
+
+    const updatedTask = await Task.findByIdAndUpdate(
+      req.params.id,
+      updates,
+      { new: true, runValidators: true }
     );
-  }
 
-  res.status(200).json({
-    success: true,
-    count: result.length,
-    data: result
-  });
-});
-
-// GET /tasks/:id - Read single task by ID (uses validateTaskId middleware)
-app.get('/tasks/:id', validateTaskId, (req, res) => {
-  const task = tasks.find(t => t.id === req.validatedId);
-  if (!task) {
-    return res.status(404).json({
-      error: 'Not Found',
-      message: `Task with ID ${req.validatedId} not found.`
-    });
-  }
-
-  res.status(200).json({
-    success: true,
-    data: task
-  });
-});
-
-// POST /tasks - Create a new task (Returns 201 Created)
-app.post('/tasks', (req, res) => {
-  const { title, description, status } = req.body;
-
-  // Validation: Title is required
-  if (!title || typeof title !== 'string' || title.trim() === '') {
-    return res.status(400).json({
-      error: 'Validation Error',
-      message: 'Task title is required and cannot be empty.'
-    });
-  }
-
-  const validStatuses = ['pending', 'in-progress', 'completed'];
-  const taskStatus = status && validStatuses.includes(status.toLowerCase())
-    ? status.toLowerCase()
-    : 'pending';
-
-  const now = new Date().toISOString();
-  const newTask = {
-    id: nextId++,
-    title: title.trim(),
-    description: description ? description.trim() : '',
-    status: taskStatus,
-    createdAt: now,
-    updatedAt: now
-  };
-
-  tasks.push(newTask);
-
-  res.status(201).json({
-    success: true,
-    message: 'Task created successfully.',
-    data: newTask
-  });
-});
-
-// PUT /tasks/:id - Update an existing task (uses validateTaskId middleware)
-app.put('/tasks/:id', validateTaskId, (req, res) => {
-  const taskIndex = tasks.findIndex(t => t.id === req.validatedId);
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      error: 'Not Found',
-      message: `Task with ID ${req.validatedId} does not exist.`
-    });
-  }
-
-  const { title, description, status } = req.body;
-
-  // Partial or full update
-  if (title !== undefined) {
-    if (typeof title !== 'string' || title.trim() === '') {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Title must be a non-empty string.'
+    if (!updatedTask) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: `Task with ID ${req.params.id} not found.`
       });
     }
-    tasks[taskIndex].title = title.trim();
+
+    res.status(200).json({
+      success: true,
+      message: 'Task updated successfully in MongoDB.',
+      data: updatedTask
+    });
+  } catch (err) {
+    next(err);
   }
-
-  if (description !== undefined) {
-    tasks[taskIndex].description = typeof description === 'string' ? description.trim() : '';
-  }
-
-  if (status !== undefined) {
-    const validStatuses = ['pending', 'in-progress', 'completed'];
-    if (!validStatuses.includes(status.toLowerCase())) {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: `Status must be one of: ${validStatuses.join(', ')}.`
-      });
-    }
-    tasks[taskIndex].status = status.toLowerCase();
-  }
-
-  tasks[taskIndex].updatedAt = new Date().toISOString();
-
-  res.status(200).json({
-    success: true,
-    message: `Task with ID ${req.validatedId} updated successfully.`,
-    data: tasks[taskIndex]
-  });
 });
 
-// DELETE /tasks/:id - Delete a task by ID (uses validateTaskId middleware)
-app.delete('/tasks/:id', validateTaskId, (req, res) => {
-  const taskIndex = tasks.findIndex(t => t.id === req.validatedId);
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      error: 'Not Found',
-      message: `Task with ID ${req.validatedId} not found.`
+// DELETE /tasks/:id - Delete a task using Task.findByIdAndDelete()
+app.delete('/tasks/:id', validateTaskId, async (req, res, next) => {
+  try {
+    const deletedTask = await Task.findByIdAndDelete(req.params.id);
+
+    if (!deletedTask) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: `Task with ID ${req.params.id} not found.`
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Task deleted successfully from MongoDB.',
+      data: deletedTask
     });
+  } catch (err) {
+    next(err);
   }
-
-  const [deletedTask] = tasks.splice(taskIndex, 1);
-
-  res.status(200).json({
-    success: true,
-    message: `Task with ID ${req.validatedId} deleted successfully.`,
-    data: deletedTask
-  });
 });
 
 // ==========================================
-// 7. Faculty Demonstration Route: Deliberate Error Trigger
-// Demonstrates global error handler catching unhandled exceptions
+// 6. Deliberate Error Trigger (Faculty Demonstration)
 // ==========================================
 app.get('/trigger-error', (req, res, next) => {
   const err = new Error('Demonstration: Deliberately triggered internal server error.');
@@ -264,8 +228,7 @@ app.get('/trigger-error', (req, res, next) => {
 });
 
 // ==========================================
-// 8. Supplementary Problem: Custom 404 Handler for Undefined Routes
-// Catches any requests that did not match registered routes
+// 7. Custom 404 Handler for Undefined Routes
 // ==========================================
 app.use((req, res) => {
   res.status(404).json({
@@ -283,11 +246,29 @@ app.use((req, res) => {
 });
 
 // ==========================================
-// 9. Global Centralized Error Handling Middleware
-// Defined LAST in the middleware pipeline with (err, req, res, next)
+// 8. Global Centralized Error Handling Middleware
+// Formats Mongoose ValidationErrors and CastErrors cleanly
 // ==========================================
 app.use((err, req, res, next) => {
   console.error('[Global Error Handler] Caught Exception:\n', err.stack || err.message);
+
+  // Mongoose Validation Error (e.g. required field missing, enum mismatch)
+  if (err.name === 'ValidationError') {
+    const errorDetails = Object.values(err.errors).map(e => e.message);
+    return res.status(400).json({
+      error: 'Validation Error',
+      message: errorDetails.join(', '),
+      fields: Object.keys(err.errors)
+    });
+  }
+
+  // Mongoose Cast Error (e.g. bad ObjectId format)
+  if (err.name === 'CastError') {
+    return res.status(400).json({
+      error: 'Invalid Parameter',
+      message: `Invalid format for field '${err.path}': ${err.value}`
+    });
+  }
 
   const statusCode = err.status || 500;
   res.status(statusCode).json({
@@ -297,17 +278,29 @@ app.use((err, req, res, next) => {
 });
 
 // ==========================================
-// 10. Start HTTP Server
+// 9. Database Connection & Server Initialization
 // ==========================================
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`====================================================`);
-    console.log(`Task Manager REST API Server is running on port ${PORT}`);
-    console.log(`Base URL: http://localhost:${PORT}`);
-    console.log(`Logging Middleware: Active`);
-    console.log(`Global Error Handler: Active`);
-    console.log(`====================================================`);
-  });
-}
+let serverInstance = null;
+
+const startServer = async () => {
+  try {
+    await mongoose.connect(MONGO_URI);
+    console.log(`[MongoDB] Connected successfully to: ${MONGO_URI}`);
+
+    if (require.main === module) {
+      serverInstance = app.listen(PORT, () => {
+        console.log(`====================================================`);
+        console.log(`Task Manager REST API (Practical 5) running on port ${PORT}`);
+        console.log(`Base URL: http://localhost:${PORT}`);
+        console.log(`MongoDB Database: Connected via Mongoose`);
+        console.log(`====================================================`);
+      });
+    }
+  } catch (err) {
+    console.error('[MongoDB] Connection failed:', err.message);
+  }
+};
+
+startServer();
 
 module.exports = app;
